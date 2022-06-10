@@ -1,0 +1,508 @@
+/*----------------------------------------------------------------------------*/
+/*                                                                            */
+/*    Module:       main.cpp                                                  */
+/*    Author:       Sydney Gabe Hodge                                         */
+/*    Created:      Thu Sep 26 2019                                           */
+/*    Description:  excuse me sir? yes, you. your mother. adios!              */
+/*                                                                            */
+/*----------------------------------------------------------------------------*/
+
+// ---- START VEXCODE CONFIGURED DEVICES ----
+// Robot Configuration:
+// [Name]               [Type]        [Port(s)]
+// Controller1          controller
+// ---- END VEXCODE CONFIGURED DEVICES ----
+
+#include "vex.h"
+#include <cmath> // allows (std::abs)
+
+using namespace vex;
+
+// A global instance of competition
+competition Competition;
+vex::controller Controller1(controllerType::primary);
+vex::motor FR(vex::PORT7, ratio18_1, true);
+vex::motor BR(vex::PORT5, ratio18_1, true);
+vex::motor FL(vex::PORT8, ratio18_1, false);
+vex::motor BL(vex::PORT10, ratio18_1, false);
+vex::motor Intake(vex::PORT15, ratio36_1, true);
+vex::motor Roller(vex::PORT10, ratio18_1, true);
+vex::motor FW1(vex::PORT18, ratio6_1, false);
+vex::motor FW2(vex::PORT19, ratio6_1, false);
+vex::inertial inertial_gyro = inertial(PORT3);
+
+
+vex::motor_group Fly(FW1, FW2);
+vex::motor_group Drivetrain(FR, FL, BL, BR);
+vex::motor_group Left(FL, BL);
+vex::motor_group Right(FR, BR);
+triport myThreeWirePort(PORT22);
+
+encoder tracker = encoder(Brain.ThreeWirePort.E);
+
+pneumatics claw = pneumatics(myThreeWirePort.A);
+
+pneumatics Angle = pneumatics(myThreeWirePort.B);
+
+pneumatics Indexer = pneumatics(myThreeWirePort.C);
+
+
+
+
+///////////////////////
+//    Brake Types   //
+/////////////////////
+
+// brakes drive in either hold or coast
+void set_hold() {
+  FR.stop(hold);
+  BR.stop(hold);
+  FL.stop(hold);
+  BL.stop(hold);
+}
+
+void set_coast() {
+  FR.setStopping(coast);
+  BR.setStopping(coast);
+  FL.setStopping(coast);
+  BL.setStopping(coast);
+}
+
+void coast_drive() {
+  FR.stop(coast);
+  BR.stop(coast);
+  FL.stop(coast);
+  BL.stop(coast);
+}
+
+void brake_drive() {
+  FR.stop(hold);
+  BR.stop(hold);
+  FL.stop(hold);
+  BL.stop(hold);
+}
+
+void reset_rotation() {
+  FR.resetRotation();
+  BR.resetRotation();
+  FL.resetRotation();
+  BL.resetRotation();
+  Intake.resetRotation();
+}
+
+void set_position(int pos) {
+  FR.setPosition(pos, deg);
+  BR.setPosition(pos, deg);
+  FL.setPosition(pos, deg);
+  BL.setPosition(pos, deg);
+}
+
+////////////////////////////////////////////
+//                                        //
+//                                        //
+//    Driver Control Global Statements    //
+//                                        //
+//                                        //
+///////////////////////////////////////////
+
+////////////////////////////
+//    Intake Statements    //
+//////////////////////////
+
+void intake() { Intake.spin(directionType::fwd, 12, voltageUnits::volt); }
+
+
+void intakeRev() { Intake.spin(directionType::rev, 12, voltageUnits::volt); }
+
+
+void intakeBrake() { Intake.stop(brakeType::hold); }
+// Lift brake types (hold,coast,brake)
+
+
+
+///////////////////////////////
+//      Flywheel Statements //
+/////////////////////////////
+
+void fly() { Fly.spin(directionType::fwd, 12, voltageUnits::volt); }
+
+
+void flyBrake() { Fly.stop(brakeType::coast); }
+
+
+////////////////////////////
+//    Ring Statements    //
+//////////////////////////
+
+void roller() { //85.416667  .91666667
+  Roller.spin(directionType::fwd, 12, voltageUnits::volt);}
+//change the number to alter the speed of the ring intake when moving forward
+
+void rollerRev() {
+  Roller.spin(directionType::rev, 12, voltageUnits::volt);}
+//change the number to alter the speed of the ring intake when reversed
+
+void rollerBrake() {
+  Roller.stop(brakeType::coast);}
+//Ring brake types (Uses coast but could use hold too)
+
+
+     ////////////////////////////////////////
+    //                                    //
+   //                                    //
+  //    Autonomous Global Statements    //
+ //                                    //
+//                                    //
+///////////////////////////////////////
+
+
+
+void turn_left(int pos, int speed, bool stopping) {
+  FR.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, false);
+  BR.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, false);
+}
+
+void turn_right(int pos, int speed, bool stopping) {
+  FL.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, false);
+  BL.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, false);
+  FR.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, true);
+  BR.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, true);
+}
+void intake_up(int pos, int speed, bool stopping) {
+  Intake.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, stopping);
+}
+
+void move(int pos, int speed, bool stopping){
+  Drivetrain.setStopping(coast);
+  Drivetrain.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, stopping);
+}
+void roller(int pos, int speed, bool stopping){
+  Roller.rotateFor(pos, rotationUnits::deg, speed, velocityUnits::pct, stopping);
+}
+
+
+
+///////////////////////////////
+//    PD Linear Movement    //
+/////////////////////////////
+
+
+double prevErrorInertial = 0;
+double targetError = 0;
+double prevTarget = 0;
+
+void reset() {
+  tracker.resetRotation();
+  inertial_gyro.resetRotation();
+}
+
+void inertialCalibration() {
+  inertial_gyro.calibrate();
+  while (inertial_gyro.isCalibrating()) {
+    wait(2000, msec);
+  }
+}
+
+
+void move(double target) {
+  // Constants
+  double kP = 0.15;
+  double kPAngle = 6;
+  double kI = 0;
+  double kD = 0.25;
+  double kDAngle = 0;
+
+  double error = 0;
+  double errorInertial = 0;
+  double totalError = 0;
+  double prevError = 0;
+  double derivative;
+  double derivativeInertial = 0;
+  double limit = 0;
+
+  // Resets the sensor values and then sets the current sensor values to the
+  // sensors
+  reset();
+  double trackingWheel = fabs(tracker.rotation(deg));
+
+  errorInertial = targetError + inertial_gyro.rotation(deg);
+
+  while (target > trackingWheel) {
+    //printf("error%f\n", targetError);
+    // Update sensor values
+    trackingWheel = fabs(tracker.rotation(deg));
+
+    // Update the limit
+    limit += 3;
+
+    // Proportional
+    error = target - trackingWheel;
+
+    // doubleegral
+    totalError += error;
+
+    // doubleroduces I term when needed
+    if (error > 150) {
+      totalError = 0;
+    }
+
+    if (fabs(error) < 150) {
+      totalError = 20;
+    }
+
+    // Derivative
+    derivative = error - prevError;
+
+    // Derivative Inertial
+    derivativeInertial = errorInertial - prevErrorInertial;
+
+    if(errorInertial < 0.7){
+      kPAngle = 0;
+    }
+    else{
+      kPAngle = 5;
+    }
+
+    // Find the speed of chassis based of the sum of the constants
+    double motorPower = (kP * error) + (kI * totalError) + (kD * derivative);
+    double heading = (kPAngle * errorInertial) + (kDAngle * derivativeInertial);
+
+    // If the motorPower is larger then the limit, the motor power will equal
+    // the limit
+    if (limit < motorPower) {
+      motorPower = limit;
+    }
+
+    if (fabs(motorPower) < 10) { 
+      motorPower = 10;
+    }
+
+    if (motorPower > 90) {
+      motorPower = 90;
+    }
+
+    // Sets the speed of the drive
+    FL.spin(directionType::rev, 110 * (motorPower - motorPower / 90 * heading),
+            voltageUnits::mV);
+    BL.spin(directionType::rev, 110 * (motorPower - motorPower / 90 * heading),
+            voltageUnits::mV);
+    FR.spin(directionType::rev, 110 * (motorPower + motorPower / 90 * heading),
+            voltageUnits::mV);
+    BR.spin(directionType::rev, 110 * (motorPower + motorPower / 90 * heading),
+            voltageUnits::mV);
+
+    prevError = error;
+    prevErrorInertial = errorInertial;
+
+    
+      errorInertial = inertial_gyro.rotation(degrees) - targetError;
+
+      printf("heading%f\n", heading);
+    
+    task::sleep(10);
+  }
+  // When the loop ends, the motors are set to brake for less uncertadoubley and
+  // then set the coast for drive control
+  printf("tracker%f\n", tracker.rotation(degrees));
+  reset();
+  set_hold();
+}
+
+
+
+
+
+
+
+////////////////////////////////////////////
+//                                        //
+//                                        //
+//        Pre-Autonomous Functions        //
+//                                        //
+//                                        //
+///////////////////////////////////////////
+void pre_auton(void) {
+  // Initializing Robot Configuration. DO NOT REMOVE!
+vexcodeInit();
+inertialCalibration();
+}
+
+////////////////////////////////////////////
+//                                        //
+//                                        //
+//             Autonomous Task            //
+//                                        //
+//                                        //
+///////////////////////////////////////////
+
+void autonomous(void) {
+}
+////////////////////////////////////////////
+//                                        \\
+//                                        //
+//             Driver Control             \\
+//                                        //
+//                                        \\
+////////////////////////////////////////////
+
+void usercontrol(void) {
+
+  // Drivetrain
+  double turnImportance = 0.5;
+
+  // Claw stay closed after auton
+  Indexer.open();
+
+  // More claw things
+  bool indexer_up = true;
+  int indexer_lock = 0;
+
+  bool fly_up = false;
+  int fly_lock = 0;
+
+  bool angle_up = true; 
+  int angle_lock = 0; 
+
+  
+
+  // Everybody go fast
+  Intake.setVelocity(100, percent);
+
+
+
+  // brake types
+  Intake.setStopping(brakeType::hold);
+  Roller.setStopping(brakeType::coast);
+  // Controller Axis Code
+  while (true) {
+    double turnPct = Controller1.Axis4.position();
+    double forwardPct = Controller1.Axis2.position();
+
+    double turnVolts = turnPct * 0.12;
+    double forwardVolts =
+        forwardPct * 0.12 * (1 - (std::abs(turnVolts) / 12.0) * turnImportance);
+
+      FR.spin(forward, forwardVolts - turnVolts, voltageUnits::volt);
+      FL.spin(forward, forwardVolts + turnVolts, voltageUnits::volt);
+      BR.spin(forward, forwardVolts - turnVolts, voltageUnits::volt);
+      BL.spin(forward, forwardVolts + turnVolts, voltageUnits::volt);
+    
+
+    ///////////////////////
+    //     Indexer      //
+    /////////////////////
+
+    if (Controller1.ButtonL2.pressing() && indexer_lock == 0) {
+      indexer_up = !indexer_up;
+      indexer_lock = 1;
+    }
+
+    else if (!Controller1.ButtonL2.pressing()) {
+      indexer_lock = 0;
+    }
+
+    if (indexer_up)
+      Indexer.close();
+
+    else
+      Indexer.open();
+  
+
+
+    /////////////////////
+    //  Intake        //
+    ///////////////////
+
+    if (Controller1.ButtonB.pressing()) {
+      intake();
+    }
+
+    else if (Controller1.ButtonDown.pressing()) {
+      intakeRev();
+    }
+
+    else {
+      intakeBrake();
+    }
+
+////////////////////////
+//    Ring Intake    //
+//////////////////////
+
+   
+  if(Controller1.ButtonX.pressing()){ //if L1 is pressing run the ring intake fwd
+    roller();
+}
+ 
+    else if(Controller1.ButtonUp.pressing()){ //if L2 is pressing run the ring intake rev
+      rollerRev();
+}
+
+      else{ //if L2 && L1 not being pressed brake ring intake
+        rollerBrake(); 
+}
+
+
+    ////////////////////////////////
+   //                            //
+  //   Angle changer            //
+  ///////////////////////////////
+
+
+    if (Controller1.ButtonL1.pressing() && angle_lock == 0) {
+      angle_up = !angle_up;
+      angle_lock = 1;
+    }
+
+    else if (!Controller1.ButtonL1.pressing()) {
+      angle_lock = 0;
+    }
+
+    if (angle_up)
+      Angle.close();
+
+    else
+      Angle.open();
+
+
+      ///////////////////////////////
+     //        Flywheel           //
+    ///////////////////////////////
+
+        if (Controller1.ButtonR2.pressing() && fly_lock == 0) {
+      fly_up = !fly_up;
+      fly_lock = 1;
+    }
+
+    else if (!Controller1.ButtonR2.pressing()) {
+      fly_lock = 0;
+    }
+
+    if (fly_up)
+      fly();
+
+    else
+      flyBrake();
+
+
+    wait(20, msec); // Sleep the task for a short amount of time to
+                    // prevent wasted resources.
+  }
+}
+
+//
+// Main will set up the competition functions and callbacks.
+//
+int main() {
+  // Set up callbacks for autonomous and driver control periods.
+  Competition.autonomous(autonomous);
+  Competition.drivercontrol(usercontrol);
+
+  // Run the pre-autonomous function.
+  pre_auton();
+
+  // Prevent main from exiting with an infinite loop.
+  while (true) {
+    wait(100, msec);
+  }
+}
